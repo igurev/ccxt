@@ -74,6 +74,7 @@
     "luno":          { "skip": true },
     "mercadobitcoin": { "skip": true },
     "mixcoins":      { "skip": true },
+    "nominex":       { "skip": true },
     "nova":          { "skip": true },
     "oceanex":       { "skip": true },
     "okcoin":        { "skip": true },
