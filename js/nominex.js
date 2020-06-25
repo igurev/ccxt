@@ -83,7 +83,7 @@ module.exports = class nominex extends Exchange {
                         'pairs',
                         'ticker/{symbol}',
                         'ticker',
-                        'orderbook/{symbol}/A0/{limit}',
+                        'orderbook/{symbol}',
                         'candles/{symbol}/{timeframe}',
                         'trades/{symbol}',
                     ],
@@ -105,10 +105,11 @@ module.exports = class nominex extends Exchange {
                     'post': [
                         'orders',
                         'wallets/{currency}/address',
-                        'withdrawals/{currency}',
+                        'withdrawals',
                     ],
                     'put': [
                         'orders/{id}',
+                        'orders/by-client-id/{cid}',
                     ],
                     'delete': [
                         'orders/{id}',
@@ -174,10 +175,10 @@ module.exports = class nominex extends Exchange {
     }
 
     parseCurrency (currency) {
-        const code = this.safeString (currency, 'code');
+        const currencyId = this.safeString (currency, 'code');
         return {
-            'id': code,
-            'code': code,
+            'id': currencyId,
+            'code': this.safeCurrencyCode (currencyId),
             'name': this.safeString (currency, 'name'),
             'active': true,
             'fee': this.safeFloat (currency, 'withdrawalFee'),
@@ -231,8 +232,8 @@ module.exports = class nominex extends Exchange {
     async fetchBalance (params = {}) {
         await this.loadMarkets ();
         const balanceType = this.safeString (params, 'type', 'SPOT');
-        const query = this.omit (params, 'type');
-        const response = await this.privateGetWallets (query);
+        const request = this.omit (params, 'type');
+        const response = await this.privateGetWallets (request);
         const result = { 'info': response };
         for (let i = 0; i < response.length; i++) {
             const balance = response[i];
@@ -254,39 +255,26 @@ module.exports = class nominex extends Exchange {
         await this.loadMarkets ();
         const request = {
             'symbol': this.marketId (symbol),
-            'limit': 100,
         };
-        if (limit === 25) {
-            request['limit'] = limit;
-        }
-        const response = await this.publicGetOrderbookSymbolA0Limit (this.extend (request, params));
-        const asks = [];
-        const bids = [];
-        for (let i = 0; i < response.length; ++i) {
-            const priceLevel = response[i];
-            const side = this.safeString (priceLevel, 'side');
-            if (side === 'SELL') {
-                asks.push (priceLevel);
-            } else {
-                bids.push (priceLevel);
-            }
-        }
+        const response = await this.publicGetOrderbookSymbol (this.extend (request, params));
+        const asks = this.filterBy (response, 'side', 'SELL');
+        const bids = this.filterBy (response, 'side', 'BUY');
+
         return this.parseOrderBook ({ 'asks': asks, 'bids': bids }, undefined, 'bids', 'asks', 'price', 'amount');
     }
 
     async fetchTickers (symbols = undefined, params = {}) {
         await this.loadMarkets ();
-        const urlParams = {};
-        const request = { 'urlParams': urlParams };
-        const ids = Object.keys (this.markets);
+        let ids = [];
         if (symbols !== undefined) {
             for (let i = 0; i < symbols.length; ++i) {
                 const symbol = symbols[i];
-                const market = this.market (symbol);
-                ids.push (market['id']);
+                ids.push (this.marketId (symbol));
             }
+        } else {
+            ids = Object.keys (this.markets)
         }
-        urlParams['pairs'] = ids.join (',');
+        const request = { 'pairs': ids.join (',') };
         const response = await this.publicGetTicker (this.extend (request, params));
         const result = {};
         for (let i = 0; i < response.length; i++) {
@@ -314,7 +302,7 @@ module.exports = class nominex extends Exchange {
         let symbol = undefined;
         if (market !== undefined) {
             symbol = market['symbol'];
-        } else if ('pair' in ticker) {
+        } else {
             const marketId = this.safeString (ticker, 'pair');
             if (marketId !== undefined) {
                 if (marketId in this.markets_by_id) {
@@ -330,7 +318,7 @@ module.exports = class nominex extends Exchange {
             }
         }
         const last = this.safeFloat (ticker, 'price');
-        const volume = this.safeFloat (ticker, 'baseVolume');
+        const baseVolume = this.safeFloat (ticker, 'baseVolume');
         const quoteVolume = this.safeFloat (ticker, 'quoteVolume');
         return {
             'symbol': symbol,
@@ -349,8 +337,8 @@ module.exports = class nominex extends Exchange {
             'previousClose': last - this.safeFloat (ticker, 'dailyChange'),
             'change': this.safeFloat (ticker, 'dailyChange'),
             'percentage': this.safeFloat (ticker, 'dailyChangeP'),
-            'average': (volume !== undefined && volume !== 0) ? (quoteVolume / volume) : undefined,
-            'baseVolume': volume,
+            'average': (baseVolume !== undefined && baseVolume !== 0) ? (quoteVolume / baseVolume) : undefined,
+            'baseVolume': baseVolume,
             'quoteVolume': quoteVolume,
             'info': ticker,
         };
@@ -369,21 +357,16 @@ module.exports = class nominex extends Exchange {
 
     async fetchOHLCV (symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        if (limit === undefined) {
-            limit = 100;
-        }
         const market = this.market (symbol);
-        const urlParams = {
-            'limit': limit,
-            'end': this.milliseconds (),
-        };
         const request = {
             'symbol': market['id'],
             'timeframe': this.timeframes[timeframe],
-            'urlParams': urlParams,
         };
         if (since !== undefined) {
             request['start'] = since;
+        }
+        if (limit !== undefined) {
+            request['limit'] = limit;
         }
         const response = await this.publicGetCandlesSymbolTimeframe (this.extend (request, params));
         return this.parseOHLCVs (response, market, timeframe, since, limit);
@@ -436,16 +419,14 @@ module.exports = class nominex extends Exchange {
     async fetchTrades (symbol, since = undefined, limit = 50, params = {}) {
         await this.loadMarkets ();
         const market = this.market (symbol);
-        const urlParams = {};
         const request = {
             'symbol': market['id'],
-            'urlParams': urlParams,
         };
         if (since !== undefined) {
-            urlParams['start'] = parseInt (since);
+            request['start'] = parseInt (since);
         }
         if (limit !== undefined) {
-            urlParams['limit'] = limit;
+            request['limit'] = limit;
         }
         const response = await this.publicGetTradesSymbol (this.extend (request, params));
         return this.parseTrades (this.safeValue (response, 'items'), market, since, limit);
@@ -483,16 +464,14 @@ module.exports = class nominex extends Exchange {
         }
         await this.loadMarkets ();
         const market = this.market (symbol);
-        const urlParams = {};
         const request = {
             'symbol': market['id'],
-            'urlParams': urlParams,
         };
-        if (limit !== undefined) {
-            urlParams['limit'] = limit;
-        }
         if (since !== undefined) {
-            urlParams['start'] = parseInt (since);
+            request['start'] = parseInt (since);
+        }
+        if (limit !== undefined) {
+            request['limit'] = limit;
         }
         const response = await this.privateGetTradesSymbol (this.extend (request, params));
         return this.parseTrades (this.safeValue (response, 'items'), market, since, limit);
@@ -503,7 +482,7 @@ module.exports = class nominex extends Exchange {
         const marketId = this.marketId (symbol);
         const request = {
             'pairName': marketId,
-            'side': this.safeString (this.options['tradeSides'], side, side),
+            'side': this.toUpperCase (side),
             'amount': this.amountToPrecision (symbol, amount),
             'type': this.toUpperCase (type),
             'walletType': this.safeString (params, 'walletType', 'SPOT'),
@@ -523,12 +502,6 @@ module.exports = class nominex extends Exchange {
         const request = {
             'walletType': this.safeString (params, 'walletType', 'SPOT'),
         };
-        if (id !== undefined) {
-            request['id'] = id;
-        } else if ('clientOrderId' in params) {
-            request['id'] = this.safeInteger (params, 'clientOrderId');
-            request['urlParams'] = { 'cid': true };
-        }
         if (price !== undefined) {
             request['limitPrice'] = this.priceToPrecision (symbol, price);
         }
@@ -539,13 +512,22 @@ module.exports = class nominex extends Exchange {
             request['pairName'] = this.marketId (symbol);
         }
         if (side !== undefined) {
-            request['side'] = this.safeString (this.options['tradeSides'], side, side);
+            request['side'] = this.toUpperCase (side);
         }
         if (type !== undefined) {
             request['type'] = this.toUpperCase (type);
         }
-        const response = await this.privatePutOrdersId (this.extend (request, params));
-        return this.parseOrder (response);
+        if (id !== undefined) {
+            request['id'] = id;
+            const response = await this.privatePutOrdersId (this.extend (request, params));
+            return this.parseOrder (response);
+        } else if ('clientOrderId' in params) {
+            request['cid'] = this.safeInteger (params, 'clientOrderId');
+            const response = await this.privatePutOrdersByClientIdCid (this.extend (request, params));
+            return this.parseOrder (response);
+        } else {
+            throw new ArgumentsRequired (this.id + ' editOrder requires an `id` argument or `clientOrderId` value in params ');
+        }
     }
 
     async cancelOrder (id, symbol = undefined, params = {}) {
@@ -553,11 +535,13 @@ module.exports = class nominex extends Exchange {
         const request = {};
         if (id !== undefined) {
             request['id'] = parseInt (id);
+            return await this.privateDeleteOrdersId (this.extend (request, params));
         } else if ('clientOrderId' in params) {
-            request['id'] = this.safeInteger (params, 'clientOrderId');
-            request['urlParams'] = { 'cid': true };
+            request['cid'] = this.safeInteger (params, 'clientOrderId');
+            return await this.privateDeleteOrdersByClientIdCid (this.extend (request, params));
+        } else {
+            throw new ArgumentsRequired (this.id + ' cancelOrder requires an `id` argument or `clientOrderId` value in params ');
         }
-        return await this.privateDeleteOrdersId (this.extend (request, params));
     }
 
     async fetchOrder (id, symbol = undefined, params = {}) {
@@ -565,12 +549,15 @@ module.exports = class nominex extends Exchange {
         const request = {};
         if (id !== undefined) {
             request['id'] = parseInt (id);
+            const response = await this.privateGetOrdersId (this.extend (request, params));
+            return this.parseOrder (response);
         } else if ('clientOrderId' in params) {
-            request['id'] = this.safeInteger (params, 'clientOrderId');
-            request['urlParams'] = { 'cid': true };
+            request['cid'] = this.safeInteger (params, 'clientOrderId');
+            const response = await this.privateGetOrdersByClientIdCid (this.extend (request, params));
+            return this.parseOrder (response);
+        } else {
+            throw new ArgumentsRequired (this.id + ' fetchOrder requires an `id` argument or `clientOrderId` value in params ');
         }
-        const response = await this.privateGetOrdersId (this.extend (request, params));
-        return this.parseOrder (response);
     }
 
     async fetchOpenOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
@@ -580,46 +567,44 @@ module.exports = class nominex extends Exchange {
                 throw new ExchangeError (this.id + ' has no symbol ' + symbol);
             }
         }
-        const urlParams = {};
-        const request = { 'urlParams': urlParams };
+        const request = { 'active': true };
         if (since !== undefined) {
-            urlParams['start'] = since;
+            request['start'] = since;
         }
         if (limit !== undefined) {
-            urlParams['limit'] = limit;
+            request['limit'] = limit;
         }
-        urlParams['active'] = true;
         let response = undefined;
+        let market = undefined;
         if (symbol !== undefined) {
-            const marketId = this.marketId (symbol);
-            request['symbol'] = marketId;
+            market = this.market (symbol);
+            request['symbol'] = market['id'];
             response = await this.privateGetOrdersSymbol (this.extend (request, params));
         } else {
             response = await this.privateGetOrders (this.extend (request, params));
         }
-        return this.parseOrders (this.safeValue (response, 'items'), undefined, since, limit);
+        return this.parseOrders (this.safeValue (response, 'items'), market, since, limit);
     }
 
     async fetchClosedOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        const urlParams = {};
-        const request = { 'urlParams': urlParams };
+        const request = { 'active': false };
         if (since !== undefined) {
-            urlParams['start'] = since;
+            request['start'] = since;
         }
         if (limit !== undefined) {
-            urlParams['limit'] = limit;
+            request['limit'] = limit;
         }
-        urlParams['active'] = false;
         let response = undefined;
+        let market = undefined;
         if (symbol !== undefined) {
-            const marketId = this.marketId (symbol);
-            request['symbol'] = marketId;
+            market = this.market (symbol);
+            request['symbol'] = market['id'];
             response = await this.privateGetOrdersSymbol (this.extend (request, params));
         } else {
             response = await this.privateGetOrders (this.extend (request, params));
         }
-        return this.parseOrders (this.safeValue (response, 'items'), undefined, since, limit);
+        return this.parseOrders (this.safeValue (response, 'items'), market, since, limit);
     }
 
     parseOrder (order, market = undefined) {
@@ -694,7 +679,7 @@ module.exports = class nominex extends Exchange {
     async createDepositAddress (code, params = {}) {
         await this.loadMarkets ();
         const request = {
-            'currency': this.currency (code).id,
+            'currency': this.currencyId (code),
         };
         const response = await this.privatePostWalletsCurrencyAddress (this.extend (request, params));
         const address = this.safeValue (response, 'address');
@@ -712,16 +697,14 @@ module.exports = class nominex extends Exchange {
         await this.loadMarkets ();
         const request = {
             'currency': code,
-            'urlParams': {
-                'formatted': true,
-            },
+            'formatted': true,
         };
         const response = await this.privateGetWalletsCurrencyAddress (this.extend (request, params));
         const address = this.safeValue (response, 'address');
         const tag = this.safeValue (response, 'tag');
         this.checkAddress (address);
         return {
-            'currency': this.currency (code).id,
+            'currency': this.currencyId (code),
             'address': address,
             'tag': tag,
             'info': response,
@@ -730,53 +713,54 @@ module.exports = class nominex extends Exchange {
 
     async fetchDeposits (code = undefined, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        const urlParams = {};
-        const request = { 'urlParams': urlParams };
-        const start = since !== undefined ? since : 0;
-        urlParams['start'] = start;
-        urlParams['end'] = this.milliseconds ();
+        const request = { };
+        if (since !== undefined) {
+            request['start'] = since;
+        }
         if (limit !== undefined) {
-            urlParams['limit'] = limit;
+            request['limit'] = limit;
         }
         let response = undefined;
+        let currency = undefined;
         if (code !== undefined) {
-            request['currency'] = this.currency (code).id;
+            currency = this.currency (code);
+            request['currency'] = currency['id'];
             response = await this.privateGetWalletsCurrencyDeposits (this.extend (request, params));
         } else {
             response = await this.privateGetDeposits (this.extend (request, params));
         }
         const deposits = this.safeValue (response, 'items');
         for (let i = 0; i < deposits.length; ++i) {
-            deposits[i]['type'] = 'DEPOSIT';
+            const entry = deposits[i];
+            entry['type'] = 'DEPOSIT';
         }
-        return this.parseTransactions (deposits, undefined, since, limit);
+        return this.parseTransactions (deposits, currency, since, limit);
     }
 
     async fetchWithdrawals (code = undefined, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        const urlParams = {};
-        const request = { 'urlParams': urlParams };
+        const request = { };
         if (since !== undefined) {
-            request['form'] = since;
+            request['start'] = since;
         }
-        const start = since !== undefined ? since : 0;
-        urlParams['start'] = start;
-        urlParams['end'] = this.milliseconds ();
         if (limit !== undefined) {
-            urlParams['limit'] = limit;
+            request['limit'] = limit;
         }
         let response = undefined;
+        let currency = undefined;
         if (code !== undefined) {
-            request['currency'] = this.currency (code).id;
+            currency = this.currency (code);
+            request['currency'] = currency['id'];
             response = await this.privateGetWalletsCurrencyWithdrawals (this.extend (request, params));
         } else {
             response = await this.privateGetWithdrawals (this.extend (request, params));
         }
         const withdrawals = this.safeValue (response, 'items');
         for (let i = 0; i < withdrawals.length; ++i) {
-            withdrawals[i]['type'] = 'WITHDRAWAL';
+            const entry = withdrawals[i];
+            entry['type'] = 'WITHDRAWAL';
         }
-        return this.parseTransactions (withdrawals, undefined, since, limit);
+        return this.parseTransactions (withdrawals, currency, since, limit);
     }
 
     parseTransaction (transaction, currency = undefined) {
@@ -830,13 +814,12 @@ module.exports = class nominex extends Exchange {
         }
         const fee = currency.fee;
         const request = {
-            'currency': currency.id,
-            'amount': this.sum (amount, fee),
+            'amount': amount,
             'fee': fee,
-            'currencyCode': currency.id,
+            'currencyCode': currency['id'],
             'destination': destination,
         };
-        const response = await this.privatePostWithdrawalsCurrency (this.extend (request, params));
+        const response = await this.privatePostWithdrawals (this.extend (request, params));
         return {
             'info': response,
             'id': this.safeString (response, 'id'),
@@ -850,24 +833,23 @@ module.exports = class nominex extends Exchange {
     sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
         const request = '/' + this.implodeParams (path, params);
         const query = this.omit (params, this.extractParams (path));
-        const apiUrls = this.urls['api'];
-        const urlParams = this.safeValue (query, 'urlParams');
-        let url = apiUrls[api] + request;
-        const urlParamsStr = (urlParams !== undefined) ? this.urlencode (urlParams) : '';
-        if (urlParamsStr !== '') {
-            url += '?' + urlParamsStr;
+        let url = this.urls['api'][api] + request;
+        if (method === 'GET' || method === 'DELETE') {
+            const queryStr = this.urlencode (query);
+            if (queryStr !== '') {
+                url += '?' + queryStr;
+            }
         }
-        const requestBody = this.omit (query, 'urlParams');
         if (api === 'private') {
             this.checkRequiredCredentials ();
             const nonce = this.nonce ().toString ();
-            const urlPath = this.options['paths']['private'] + request;
-            let payloadSuffix = '';
+            const urlPath = this.options['paths'][api] + request;
+            let requestBody = '';
             if (method !== 'GET' && method !== 'DELETE') {
-                body = this.json (requestBody);
-                payloadSuffix = body;
+                body = this.json (query);
+                requestBody = body;
             }
-            let payload = '/api' + urlPath + nonce + payloadSuffix;
+            let payload = '/api' + urlPath + nonce + requestBody;
             payload = this.encode (payload);
             const secret = this.encode (this.secret);
             const signature = this.hmac (payload, secret, 'sha384').toUpperCase ();
